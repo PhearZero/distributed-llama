@@ -141,7 +141,22 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
             info.M = batchSize;
             info.K = K;
             info.N = N;
-            info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32; // Default to FP16 -> FP32 for now
+
+            if (opConfig->weightSize.floatType == F_16) {
+                info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+            } else if (opConfig->weightSize.floatType == F_Q40) {
+                // Rockchip NPU INT4 MatMul might require specific scale/zero point handling.
+                // For now, let's stick to FP16 if we can't reliably map Distributed Llama's Q40.
+                // Actually, if the model is Q40, the best performance is with INT4 MM.
+                // However, Distributed Llama's Q40 has a per-block (32 tokens) scale.
+                // RKNPU2 MatMul INT4 might expect a different quantization scheme.
+                // Let's use FP16 MM as a safer (though slower) baseline if we don't have exact INT4 mapping.
+                // Wait, if weights are loaded as Q40, we MUST handle them.
+                info.type = RKNN_FLOAT16_MM_INT4_TO_FLOAT32;
+            } else {
+                info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+            }
+
             info.B_layout = 1; // Native layout for B
             info.AC_layout = 0; // Normal layout for A and C
 
@@ -163,7 +178,18 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
 
             // Convert and copy weight to mem_B
             if (ctx.nativeWeight) {
-                if (opConfig->weightSize.floatType == F_16) {
+                if (opConfig->weightSize.floatType == F_16 || opConfig->weightSize.floatType == F_Q40) {
+                    rknn_matmul_info info;
+                    std::memset(&info, 0, sizeof(info));
+                    info.M = batchSize;
+                    info.K = K;
+                    info.N = N;
+                    if (opConfig->weightSize.floatType == F_16) {
+                        info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+                    } else {
+                        info.type = RKNN_FLOAT16_MM_INT4_TO_FLOAT32;
+                    }
+                    info.B_layout = 1;
                     rknn_B_normal_layout_to_native_layout(ctx.nativeWeight, ctx.mem_B->virt_addr, K, N, &info);
                 } else {
                     std::memcpy(ctx.mem_B->virt_addr, ctx.nativeWeight, std::min((NnSize)ctx.io_attr.B.size, (NnSize)opConfig->weightSize.nBytes));
@@ -190,10 +216,35 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         // 1. Copy Input A (Activations) to mem_A
         NnByte *inputA = getPointer(netExecution, &opConfig->input, cpuBuffers);
         if (inputA) {
-            // Need to handle FP32 to FP16 conversion if info.type is RKNN_FLOAT16_MM_...
             // Distributed Llama often uses FP32 for activations in the pipeline.
-            // For now, assume matching types or add conversion logic.
-            std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, (NnSize)(batchSize * K * sizeof(float))));
+            // RKNN_FLOAT16_MM_... expects FP16 input.
+
+            NnSize3D inputSize;
+            switch (opConfig->input.source) {
+            case SRC_BUFFER:
+                inputSize = cpuBufferConfigs[opConfig->input.pointerIndex].size;
+                break;
+            case SRC_PIPE:
+                inputSize = netConfig->pipes[opConfig->input.pointerIndex].size;
+                break;
+            default:
+                inputSize = size0();
+            }
+
+            if (inputSize.floatType == F_32) {
+                // Convert FP32 to FP16
+                float *src = (float *)inputA;
+                NnFp16 *dst = (NnFp16 *)ctx.mem_A->virt_addr;
+                NnUint n = batchSize * K;
+                for (NnUint i = 0; i < n; i++) {
+                    dst[i] = CONVERT_F32_TO_F16(src[i]);
+                }
+            } else if (inputSize.floatType == F_16) {
+                std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, (NnSize)(batchSize * K * sizeof(NnFp16))));
+            } else {
+                // Fallback to memcpy and hope for the best
+                std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, (NnSize)(batchSize * K * getBytes(inputSize.floatType, 1))));
+            }
         }
 
         // 2. Run MatMul
@@ -202,7 +253,34 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         // 3. Copy Output C to output pipe
         NnByte *outputC = getPointer(netExecution, &opConfig->output, cpuBuffers);
         if (outputC) {
-            std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, (NnSize)(batchSize * N * sizeof(float))));
+            // RKNN_FLOAT16_MM_..._TO_FLOAT32 produces FP32 output
+            // Distributed Llama usually expects FP32 outputs for MatMul in the pipeline
+
+            NnSize3D outputSize;
+            switch (opConfig->output.source) {
+            case SRC_BUFFER:
+                outputSize = cpuBufferConfigs[opConfig->output.pointerIndex].size;
+                break;
+            case SRC_PIPE:
+                outputSize = netConfig->pipes[opConfig->output.pointerIndex].size;
+                break;
+            default:
+                outputSize = size0();
+            }
+
+            if (outputSize.floatType == F_32) {
+                std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, (NnSize)(batchSize * N * sizeof(float))));
+            } else if (outputSize.floatType == F_16) {
+                // Convert FP32 to FP16
+                float *src = (float *)ctx.mem_C->virt_addr;
+                NnFp16 *dst = (NnFp16 *)outputC;
+                NnUint n = batchSize * N;
+                for (NnUint i = 0; i < n; i++) {
+                    dst[i] = CONVERT_F32_TO_F16(src[i]);
+                }
+            } else {
+                std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, (NnSize)(batchSize * N * getBytes(outputSize.floatType, 1))));
+            }
         }
 
         return;
