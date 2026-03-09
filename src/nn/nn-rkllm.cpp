@@ -146,12 +146,8 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
                 info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
             } else if (opConfig->weightSize.floatType == F_Q40) {
                 // Rockchip NPU INT4 MatMul might require specific scale/zero point handling.
-                // For now, let's stick to FP16 if we can't reliably map Distributed Llama's Q40.
-                // Actually, if the model is Q40, the best performance is with INT4 MM.
-                // However, Distributed Llama's Q40 has a per-block (32 tokens) scale.
-                // RKNPU2 MatMul INT4 might expect a different quantization scheme.
-                // Let's use FP16 MM as a safer (though slower) baseline if we don't have exact INT4 mapping.
-                // Wait, if weights are loaded as Q40, we MUST handle them.
+                // It is also not supported on all platforms (e.g. RK3566/RK3568).
+                // Let's try to create it, and if it fails, fallback to FP16 MM.
                 info.type = RKNN_FLOAT16_MM_INT4_TO_FLOAT32;
             } else {
                 info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
@@ -161,6 +157,13 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
             info.AC_layout = 0; // Normal layout for A and C
 
             int ret = rknn_matmul_create(&ctx.ctx, &info, &ctx.io_attr);
+            if (ret != 0 && opConfig->weightSize.floatType == F_Q40) {
+                // Fallback to FP16 MM for Q40 if INT4 MM is not supported
+                printf("NnRkllmDevice: RKNN_FLOAT16_MM_INT4_TO_FLOAT32 not supported, falling back to FP16 MM\n");
+                info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+                ret = rknn_matmul_create(&ctx.ctx, &info, &ctx.io_attr);
+            }
+
             if (ret != 0) {
                 throw std::runtime_error("rknn_matmul_create failed: " + std::to_string(ret));
             }
@@ -179,21 +182,48 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
             // Convert and copy weight to mem_B
             if (ctx.nativeWeight) {
                 if (opConfig->weightSize.floatType == F_16 || opConfig->weightSize.floatType == F_Q40) {
-                    rknn_matmul_info info;
-                    std::memset(&info, 0, sizeof(info));
-                    info.M = batchSize;
-                    info.K = K;
-                    info.N = N;
-                    if (opConfig->weightSize.floatType == F_16) {
-                        info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+                    rknn_matmul_info weight_info;
+                    std::memset(&weight_info, 0, sizeof(weight_info));
+                    weight_info.M = batchSize;
+                    weight_info.K = K;
+                    weight_info.N = N;
+
+                    // We must use the SAME type as the one used in rknn_matmul_create
+                    // io_attr.B.type was set by rknn_matmul_create based on info.type
+                    if (ctx.io_attr.B.type == RKNN_TENSOR_INT4) {
+                        weight_info.type = RKNN_FLOAT16_MM_INT4_TO_FLOAT32;
+                    } else if (opConfig->weightSize.floatType == F_Q40) {
+                        // If we are here, it means we fell back to FP16 MM but weights are Q40.
+                        // We need to dequantize Q40 to FP16 before native layout conversion.
+                        NnUint nBlocks = opConfig->weightSize.nBytes / sizeof(NnBlockQ40);
+                        NnSize nElements = nBlocks * Q40_BLOCK_SIZE;
+                        NnFp16 *fp16_weight = new NnFp16[nElements];
+
+                        // Temporary buffer for FP32 dequantization (since dequantizeQ40toF32 produces float)
+                        float *fp32_weight = new float[nElements];
+                        dequantizeQ40toF32((NnBlockQ40 *)ctx.nativeWeight, fp32_weight, nElements, 1, 0);
+
+                        for (NnSize i = 0; i < nElements; i++) {
+                            fp16_weight[i] = CONVERT_F32_TO_F16(fp32_weight[i]);
+                        }
+                        delete[] fp32_weight;
+
+                        weight_info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
+                        weight_info.B_layout = 1;
+                        rknn_B_normal_layout_to_native_layout(fp16_weight, ctx.mem_B->virt_addr, K, N, &weight_info);
+
+                        delete[] fp16_weight;
+                        goto weight_done;
                     } else {
-                        info.type = RKNN_FLOAT16_MM_INT4_TO_FLOAT32;
+                        weight_info.type = RKNN_FLOAT16_MM_FLOAT16_TO_FLOAT32;
                     }
-                    info.B_layout = 1;
-                    rknn_B_normal_layout_to_native_layout(ctx.nativeWeight, ctx.mem_B->virt_addr, K, N, &info);
+
+                    weight_info.B_layout = 1;
+                    rknn_B_normal_layout_to_native_layout(ctx.nativeWeight, ctx.mem_B->virt_addr, K, N, &weight_info);
                 } else {
                     std::memcpy(ctx.mem_B->virt_addr, ctx.nativeWeight, std::min((NnSize)ctx.io_attr.B.size, (NnSize)opConfig->weightSize.nBytes));
                 }
+weight_done:
                 delete[] ctx.nativeWeight;
                 ctx.nativeWeight = nullptr;
             }
