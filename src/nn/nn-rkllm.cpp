@@ -273,7 +273,10 @@ weight_done:
                 std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, (NnSize)(batchSize * K * sizeof(NnFp16))));
             } else {
                 // Fallback to memcpy and hope for the best
-                std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, (NnSize)(batchSize * K * getBytes(inputSize.floatType, 1))));
+                // For quantized types, we can't use getBytes with n=1 because of block alignment.
+                // We'll use the total bytes from inputSize or calculate it based on total elements.
+                NnSize bytesToCopy = getBytes(inputSize.floatType, batchSize * K);
+                std::memcpy(ctx.mem_A->virt_addr, inputA, std::min((NnSize)ctx.io_attr.A.size, bytesToCopy));
             }
         }
 
@@ -309,7 +312,9 @@ weight_done:
                     dst[i] = CONVERT_F32_TO_F16(src[i]);
                 }
             } else {
-                std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, (NnSize)(batchSize * N * getBytes(outputSize.floatType, 1))));
+                // For quantized types, we can't use getBytes with n=1 because of block alignment.
+                NnSize bytesToCopy = getBytes(outputSize.floatType, batchSize * N);
+                std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, bytesToCopy));
             }
         }
 
