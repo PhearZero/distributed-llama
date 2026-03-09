@@ -16,6 +16,9 @@ public:
     ~NnRkllmDevice() override;
     NnUint maxNThreads() override;
     NnDeviceSegment *createSegment(NnUint segmentIndex) override;
+
+    // Support for CPU fallback with SRC_BUFFER
+    std::unique_ptr<NnDevice> cpuFallbackDevice;
 };
 
 class NnRkllmDeviceSegment : public NnDeviceSegment {
@@ -41,6 +44,10 @@ private:
     std::vector<NnCpuOpContext> cpuOpContexts;
 
 public:
+    NnByte **cpuBuffers = nullptr;
+    NnBufferConfig *cpuBufferConfigs = nullptr;
+    NnByte *cpuBufferFlags = nullptr;
+
     NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution);
     ~NnRkllmDeviceSegment() override;
     void loadWeight(NnUint opIndex, NnSize offset, NnSize nBytes, NnByte *weight) override;

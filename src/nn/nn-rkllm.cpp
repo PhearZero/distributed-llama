@@ -1,16 +1,16 @@
 #include "nn-rkllm.hpp"
+#include "nn-cpu.hpp"
 #include "nn-cpu-ops.hpp"
 #include <stdexcept>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 
-static NnByte *getPointer(NnNetExecution *netExecution, NnPointerConfig *config) {
+static NnByte *getPointer(NnNetExecution *netExecution, NnPointerConfig *config, NnByte **cpuBuffers) {
     if (config->source == SRC_PIPE)
         return netExecution->pipes[config->pointerIndex];
-    // SRC_BUFFER is not easily accessible here as we don't have nodeConfig buffers memory.
-    // In distributed-llama, buffers are usually managed by the device or global memory.
-    // For now, we'll focus on SRC_PIPE which is used for activations.
+    if (config->source == SRC_BUFFER && cpuBuffers != nullptr)
+        return cpuBuffers[config->pointerIndex];
     return nullptr;
 }
 
@@ -26,7 +26,14 @@ NnUint NnRkllmDevice::maxNThreads() {
 }
 
 NnDeviceSegment *NnRkllmDevice::createSegment(NnUint segmentIndex) {
-    return new NnRkllmDeviceSegment(netConfig, segmentIndex, &nodeConfig->segments[segmentIndex], netExecution);
+    NnRkllmDeviceSegment *segment = new NnRkllmDeviceSegment(netConfig, segmentIndex, &nodeConfig->segments[segmentIndex], netExecution);
+    if (this->cpuFallbackDevice) {
+        NnCpuDevice *cpuDevice = (NnCpuDevice *)this->cpuFallbackDevice.get();
+        segment->cpuBuffers = cpuDevice->buffers;
+        segment->cpuBufferConfigs = this->nodeConfig->buffers;
+        segment->cpuBufferFlags = cpuDevice->bufferFlags;
+    }
+    return segment;
 }
 
 NnRkllmDeviceSegment::NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution)
@@ -181,7 +188,7 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         }
 
         // 1. Copy Input A (Activations) to mem_A
-        NnByte *inputA = getPointer(netExecution, &opConfig->input);
+        NnByte *inputA = getPointer(netExecution, &opConfig->input, cpuBuffers);
         if (inputA) {
             // Need to handle FP32 to FP16 conversion if info.type is RKNN_FLOAT16_MM_...
             // Distributed Llama often uses FP32 for activations in the pipeline.
@@ -193,7 +200,7 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         rknn_matmul_run(ctx.ctx);
 
         // 3. Copy Output C to output pipe
-        NnByte *outputC = getPointer(netExecution, &opConfig->output);
+        NnByte *outputC = getPointer(netExecution, &opConfig->output, cpuBuffers);
         if (outputC) {
             std::memcpy(outputC, ctx.mem_C->virt_addr, std::min((NnSize)ctx.io_attr.C.size, (NnSize)(batchSize * N * sizeof(float))));
         }
@@ -218,10 +225,12 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
 
             switch (pointerConfig->source) {
             case SRC_BUFFER:
-                // This is a problem, NnRkllmDevice doesn't have buffers allocated like NnCpuDevice
-                // For now, let's hope it's not used or we can find it.
-                // Actually, Distributed Llama uses SRC_BUFFER for weights and some temporary state.
-                throw std::runtime_error("SRC_BUFFER fallback not fully implemented in NnRkllmDevice yet");
+                if (cpuBuffers == nullptr) {
+                    throw std::runtime_error("SRC_BUFFER fallback failed: CPU buffers not initialized in NnRkllmDevice");
+                }
+                source = cpuBuffers[pointerConfig->pointerIndex];
+                sourceSize = &cpuBufferConfigs[pointerConfig->pointerIndex].size;
+                break;
             case SRC_PIPE:
                 source = netExecution->pipes[pointerConfig->pointerIndex];
                 sourceSize = &netConfig->pipes[pointerConfig->pointerIndex].size;
@@ -278,9 +287,9 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         context->nBatches = netConfig->nBatches;
         context->pipes = netExecution->pipes;
         context->pipeConfigs = netConfig->pipes;
-        context->buffers = nullptr; // Note: Global buffers not accessible here yet
-        context->bufferConfigs = nullptr;
-        context->bufferFlags = nullptr;
+        context->buffers = cpuBuffers;
+        context->bufferConfigs = cpuBufferConfigs;
+        context->bufferFlags = cpuBufferFlags;
 
         context->input = new NnByte *[inputs.size()];
         context->inputSize = inputSize;

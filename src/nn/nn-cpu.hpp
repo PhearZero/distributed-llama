@@ -10,12 +10,12 @@
 class NnCpuDevice : public NnDevice {
 public:
     NnByte **buffers;
+    NnByte *bufferFlags;
 private:
     NnNetConfig *netConfig;
     NnNodeConfig *nodeConfig;
     NnNetExecution *netExecution;
     NnUint nBuffers;
-    NnByte *bufferFlags;
 public:
     NnCpuDevice(NnNetConfig *netConfig, NnNodeConfig *nodeConfig, NnNetExecution *netExecution);
     ~NnCpuDevice() override;

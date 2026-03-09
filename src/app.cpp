@@ -165,7 +165,9 @@ static std::vector<NnExecutorDevice> resolveDevices(AppCliArgs *args, NnNetConfi
 #endif
     } else if (args->rkllm) {
 #if defined(DLLAMA_RKLLM)
-        devices.push_back(NnExecutorDevice(new NnRkllmDevice(netConfig, nodeConfig, netExecution), -1, -1));
+        NnRkllmDevice *rkllmDevice = new NnRkllmDevice(netConfig, nodeConfig, netExecution);
+        rkllmDevice->cpuFallbackDevice = std::unique_ptr<NnDevice>(new NnCpuDevice(netConfig, nodeConfig, netExecution));
+        devices.push_back(NnExecutorDevice(rkllmDevice, -1, -1));
 #else
         throw std::runtime_error("This build does not support RKLLM");
 #endif
