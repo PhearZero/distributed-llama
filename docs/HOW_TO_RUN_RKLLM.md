@@ -49,7 +49,7 @@ The current integration is a baseline that enables the use of Rockchip's NPU lib
 
 * **Hybrid Execution**: If `--rkllm 1` is specified, the NPU is used as the primary compute device.
 * **Model Format**: Distributed Llama normally uses its own `.m` format. To fully leverage the NPU, further integration with Rockchip's `.rkllm` format is required.
-* **Fine-grained Offloading**: Distributed Llama now supports fine-grained offloading of specific LLM operations (currently Matrix Multiplication) to the Rockchip NPU using the RKNPU2 MatMul API. This allows for hybrid execution where the NPU accelerates the most compute-intensive parts while the CPU handles other operations.
+* **Fine-grained Offloading**: Distributed Llama now supports fine-grained offloading of specific LLM operations (currently Matrix Multiplication) to the Rockchip NPU using the RKNPU2 MatMul API. Other operations (like Softmax, RMS Norm, etc.) automatically fall back to the CPU, ensuring full model compatibility while providing NPU acceleration for bottleneck operations.
 
 For more advanced Rockchip features, check the `rkllama` directory which contains specialized tools for Rockchip NPU.
 

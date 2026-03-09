@@ -2,6 +2,7 @@
 #define NN_RKLLM_HPP
 
 #include "nn-executor.hpp"
+#include "nn-cpu-ops.hpp"
 #include "rknn_api.h"
 #include <map>
 
@@ -36,6 +37,8 @@ private:
     };
 
     std::map<NnUint, MatMulContext> matmulContexts;
+    std::vector<NnCpuOpForward> cpuOpForward;
+    std::vector<NnCpuOpContext> cpuOpContexts;
 
 public:
     NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution);

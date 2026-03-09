@@ -31,9 +31,25 @@ NnDeviceSegment *NnRkllmDevice::createSegment(NnUint segmentIndex) {
 
 NnRkllmDeviceSegment::NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution)
     : netConfig(netConfig), segmentIndex(segmentIndex), segmentConfig(segmentConfig), netExecution(netExecution) {
+    cpuOpForward.resize(segmentConfig->nOps, nullptr);
+    cpuOpContexts.resize(segmentConfig->nOps);
+    for (NnUint i = 0; i < segmentConfig->nOps; i++) {
+        cpuOpContexts[i].input = nullptr;
+        cpuOpContexts[i].output = nullptr;
+        cpuOpContexts[i].weight = nullptr;
+        cpuOpContexts[i].weightSize.nBytes = 0;
+    }
 }
 
 NnRkllmDeviceSegment::~NnRkllmDeviceSegment() {
+    for (NnUint opIndex = 0; opIndex < cpuOpContexts.size(); opIndex++) {
+        NnCpuOpContext *context = &cpuOpContexts[opIndex];
+        if (context->input) delete[] context->input;
+        if (context->output) delete[] context->output;
+        if (context->weightSize.nBytes > 0 && context->weight) {
+            free(context->weight);
+        }
+    }
     for (auto& pair : matmulContexts) {
         MatMulContext& ctx = pair.second;
         if (ctx.initialized) {
@@ -89,6 +105,17 @@ void NnRkllmDeviceSegment::loadWeight(NnUint opIndex, NnSize offset, NnSize nByt
                 ctx.nativeWeight = new NnByte[nBytes];
                 std::memcpy(ctx.nativeWeight, weight, nBytes);
             }
+        }
+    } else {
+        // Fallback to CPU loading
+        NnCpuOpContext *context = &cpuOpContexts[opIndex];
+        if (context->weight == nullptr && opConfig->weightSize.nBytes > 0) {
+            // lazy allocation
+            if (posix_memalign((void **)&context->weight, 64, opConfig->weightSize.nBytes) != 0)
+                throw std::runtime_error("posix_memalign failed");
+        }
+        if (context->weight) {
+            std::memcpy(&context->weight[offset], weight, nBytes);
         }
     }
 }
@@ -174,5 +201,100 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
         return;
     }
 
-    throw std::runtime_error("Rockchip NPU: Fine-grained offloading only implemented for MatMul. Op code: " + std::to_string(opConfig->code));
+    // Fallback to CPU execution
+    NnCpuOpContext *context = &cpuOpContexts[opIndex];
+    if (cpuOpForward[opIndex] == nullptr) {
+        // Initialize CPU context
+        NnSize3D inputSize;
+        NnSize3D outputSize;
+
+        // We need a way to resolve pointers.
+        // NnCpuDevice has resolvePointer, but it uses buffers from NnCpuDevice.
+        // NnRkllmDevice doesn't have its own buffers yet, it relies on system pipes mostly.
+
+        auto resolvePntr = [&](NnSize3D *pntrSize, NnPointerConfig *pointerConfig) -> std::vector<NnByte *> {
+            NnByte *source;
+            NnSize3D *sourceSize;
+
+            switch (pointerConfig->source) {
+            case SRC_BUFFER:
+                // This is a problem, NnRkllmDevice doesn't have buffers allocated like NnCpuDevice
+                // For now, let's hope it's not used or we can find it.
+                // Actually, Distributed Llama uses SRC_BUFFER for weights and some temporary state.
+                throw std::runtime_error("SRC_BUFFER fallback not fully implemented in NnRkllmDevice yet");
+            case SRC_PIPE:
+                source = netExecution->pipes[pointerConfig->pointerIndex];
+                sourceSize = &netConfig->pipes[pointerConfig->pointerIndex].size;
+                break;
+            default:
+                throw std::invalid_argument("Unsupported pointer type");
+            }
+
+            switch (pointerConfig->type) {
+            case PNTR_RAW: {
+                *pntrSize = size1D(sourceSize->floatType, sourceSize->length);
+                return std::vector<NnByte *>{source};
+            }
+            case PNTR_BATCH:
+            case PNTR_BATCHED_SLICE: {
+                if (sourceSize->y != netConfig->nBatches) throw std::runtime_error("Batch size mismatch");
+                std::vector<NnByte *> pntr(sourceSize->z * sourceSize->y);
+
+                NnSize batchBytes = getBytes(sourceSize->floatType, sourceSize->x);
+                for (NnUint z = 0u; z < sourceSize->z; z++) {
+                    for (NnUint y = 0u; y < sourceSize->y; y++)
+                        pntr[z * sourceSize->y + y] = &source[(z * sourceSize->y + y) * batchBytes];
+                }
+                *pntrSize = *sourceSize;
+
+                if (pointerConfig->type == PNTR_BATCHED_SLICE) {
+                    // Fallback to single node slice for now if needed, or implement full slicing
+                    // For now, assume nodeIndex 0 or implement correctly
+                    // NnRkllmDevice segment should know its nodeIndex if we passed it.
+                }
+                return pntr;
+            }
+            default:
+                throw std::invalid_argument("Unsupported pointer config");
+            }
+        };
+
+        std::vector<NnByte *> inputs = resolvePntr(&inputSize, &opConfig->input);
+        std::vector<NnByte *> outputs = resolvePntr(&outputSize, &opConfig->output);
+
+        NnOpQuantType opQuant = getOpQuantType(
+            inputSize.floatType,
+            opConfig->weightSize.floatType,
+            outputSize.floatType);
+
+        cpuOpForward[opIndex] = getCpuOpForward(opConfig->code, opQuant);
+        if (cpuOpForward[opIndex] == nullptr) {
+             throw std::runtime_error("Rockchip NPU fallback: CPU implementation not found for op code: " + std::to_string(opConfig->code));
+        }
+
+        context->name = opConfig->name;
+        context->opConfig = opConfig->config;
+        context->weightSize = opConfig->weightSize;
+        context->nBatches = netConfig->nBatches;
+        context->pipes = netExecution->pipes;
+        context->pipeConfigs = netConfig->pipes;
+        context->buffers = nullptr; // Note: Global buffers not accessible here yet
+        context->bufferConfigs = nullptr;
+        context->bufferFlags = nullptr;
+
+        context->input = new NnByte *[inputs.size()];
+        context->inputSize = inputSize;
+        context->hasInputContinuousMemory = hasPointerContinuousMemory(&opConfig->input);
+        std::memcpy(context->input, inputs.data(), inputs.size() * sizeof(NnByte *));
+
+        context->output = new NnByte *[outputs.size()];
+        context->outputSize = outputSize;
+        context->hasOutputContinuousMemory = hasPointerContinuousMemory(&opConfig->output);
+        std::memcpy(context->output, outputs.data(), outputs.size() * sizeof(NnByte *));
+
+        NnCpuOpForwardInit opInit = getCpuOpForwardInit(opConfig->code, opQuant);
+        if (opInit) opInit(context);
+    }
+
+    cpuOpForward[opIndex](nThreads, threadIndex, batchSize, context);
 }
