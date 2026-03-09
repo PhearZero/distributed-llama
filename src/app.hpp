@@ -34,6 +34,7 @@ public:
     int gpuIndex;
     int gpuSegmentFrom;
     int gpuSegmentTo;
+    bool rkllm;
 
     // binding
     const char *host;

@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++11 -Werror -Wformat -Werror=format-security 
+CXXFLAGS = -std=c++11 -Werror -Wformat -Werror=format-security
 
 ifndef TERMUX_VERSION
 	CXXFLAGS += -march=native -mtune=native
@@ -27,6 +27,12 @@ else
 endif
 
 	DEPS += nn-vulkan.o
+endif
+
+ifdef DLLAMA_RKLLM
+	LIBS += -Lsrc/rkllama/lib -lrkllmrt -lrknnrt
+	CXXFLAGS += -DDLLAMA_RKLLM
+	DEPS += nn-rkllm.o
 endif
 
 ifeq ($(OS),Windows_NT)
@@ -62,6 +68,8 @@ nn-cpu-test: src/nn/nn-cpu-test.cpp nn-quants.o nn-core.o nn-executor.o llamafil
 nn-cpu-ops-test: src/nn/nn-cpu-ops-test.cpp nn-quants.o nn-core.o nn-executor.o llamafile-sgemm.o nn-cpu.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 nn-vulkan.o: src/nn/nn-vulkan.cpp
+	$(CXX) $(CXXFLAGS) -c $^ -o $@
+nn-rkllm.o: src/nn/nn-rkllm.cpp
 	$(CXX) $(CXXFLAGS) -c $^ -o $@
 
 ifdef DLLAMA_VULKAN

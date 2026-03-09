@@ -5,6 +5,9 @@
 #if defined(DLLAMA_VULKAN)
     #include "nn/nn-vulkan.hpp"
 #endif
+#if defined(DLLAMA_RKLLM)
+    #include "nn/nn-rkllm.hpp"
+#endif
 
 static NnFloatType parseFloatType(char *val) {
     if (std::strcmp(val, "f32") == 0) return F_32;
@@ -47,6 +50,7 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
     args.gpuIndex = -1;
     args.gpuSegmentFrom = -1;
     args.gpuSegmentTo = -1;
+    args.rkllm = false;
 
     int i = 1;
     if (requireMode && argc > 1) {
@@ -122,6 +126,8 @@ AppCliArgs AppCliArgs::parse(int argc, char* *argv, bool requireMode) {
                 throw std::runtime_error("GPU segments expected in the format <from>:<to>");
             args.gpuSegmentFrom = atoi(value);
             args.gpuSegmentTo = atoi(separator + 1);
+        } else if (std::strcmp(name, "--rkllm") == 0) {
+            args.rkllm = atoi(value) == 1;
         } else if (std::strcmp(name, "--net-turbo") == 0) {
             args.netTurbo = atoi(value) == 1;
         } else {
@@ -157,9 +163,15 @@ static std::vector<NnExecutorDevice> resolveDevices(AppCliArgs *args, NnNetConfi
 #else
         throw std::runtime_error("This build does not support GPU");
 #endif
+    } else if (args->rkllm) {
+#if defined(DLLAMA_RKLLM)
+        devices.push_back(NnExecutorDevice(new NnRkllmDevice(netConfig, nodeConfig, netExecution), -1, -1));
+#else
+        throw std::runtime_error("This build does not support RKLLM");
+#endif
     }
 
-    if (args->gpuIndex < 0 || (args->gpuSegmentFrom >= 0 && args->gpuSegmentTo >= 0)) {
+    if (!args->rkllm && (args->gpuIndex < 0 || (args->gpuSegmentFrom >= 0 && args->gpuSegmentTo >= 0))) {
         devices.push_back(NnExecutorDevice(new NnCpuDevice(netConfig, nodeConfig, netExecution), -1, -1));
     }
     return devices;
@@ -195,7 +207,7 @@ void RootLlmInference::setToken(NnUint batchIndex, NnUint token) {
 }
 
 void RootLlmInference::forward() {
-    if (network != nullptr) 
+    if (network != nullptr)
         network->writeAll(&controlPacket, sizeof(LlmControlPacket));
     executor->forward();
 }

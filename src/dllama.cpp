@@ -267,14 +267,28 @@ int main(int argc, char **argv) {
         if (std::strcmp(args.mode, "inference") == 0) {
             args.benchmark = true;
             runInferenceApp(&args, &inference);
-        } else if (std::strcmp(args.mode, "perplexity") == 0)
+        } else if (std::strcmp(args.mode, "perplexity") == 0) {
             runInferenceApp(&args, &perplexity);
-        else if (std::strcmp(args.mode, "chat") == 0)
+        } else if (std::strcmp(args.mode, "chat") == 0) {
             runInferenceApp(&args, &chat);
-        else if (std::strcmp(args.mode, "worker") == 0)
+        } else if (std::strcmp(args.mode, "worker") == 0) {
             runWorkerApp(&args);
-        else
+        } else {
+            if (args.help) {
+                printf("Usage: dllama <mode> [options]\n");
+                printf("Modes: inference, perplexity, chat, worker\n");
+                printf("Options:\n");
+                printf("  --model <path>             Path to model\n");
+                printf("  --tokenizer <path>         Path to tokenizer\n");
+                printf("  --prompt <prompt>          Prompt for inference\n");
+                printf("  --steps <n>                Number of steps for inference\n");
+                printf("  --nthreads <n>             Number of threads\n");
+                printf("  --gpu-index <n>            GPU index\n");
+                printf("  --rkllm <0|1>              Enable Rockchip NPU (default: 0)\n");
+                return EXIT_SUCCESS;
+            }
             throw std::runtime_error("Unsupported mode");
+        }
     } catch (const std::exception &e) {
         printf("🚨 Critical error: %s\n", e.what());
         returnCode = EXIT_FAILURE;
