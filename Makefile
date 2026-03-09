@@ -30,7 +30,7 @@ endif
 endif
 
 ifdef DLLAMA_RKLLM
-	LIBS += -Lsrc/rkllama/lib -lrkllmrt -lrknnrt
+	LIBS += -Lsrc/rkllama/lib -lrkllmrt -lrknnrt -Wl,-rpath,src/rkllama/lib
 	CXXFLAGS += -DDLLAMA_RKLLM
 	DEPS += nn-rkllm.o
 endif

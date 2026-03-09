@@ -7,6 +7,26 @@ Distributed Llama supports Rockchip NPU acceleration through the `rkllm` device.
 1. A Rockchip device with an NPU (e.g., RK3588, RK3576).
 2. Rockchip LLM SDK (`librkllmrt.so`) installed or available in the `src/rkllama/lib` directory.
 
+### Library Setup (Mandatory)
+
+Distributed Llama expects the Rockchip NPU libraries in `src/rkllama/lib/`. You must copy them from the manufacturer's SDKs included in this repository:
+
+```bash
+# 1. Create the library directory
+mkdir -p src/rkllama/lib/
+
+# 2. Copy the libraries (assuming Linux aarch64 for RK3588/RK3576)
+cp rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so src/rkllama/lib/
+cp rknn-llm/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so src/rkllama/lib/
+
+# 3. Add to library path (or use run_npu.sh)
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/src/rkllama/lib/
+```
+
+*Note: The updated `Makefile` and `examples/run_npu.sh` should handle this automatically using rpath.*
+
+*Note: For Android or other architectures, use the corresponding folder in the SDK (e.g., `Android/arm64-v8a` or `Linux/armhf`).*
+
 ## Build
 
 To build Distributed Llama with Rockchip NPU support, use the `DLLAMA_RKLLM` flag:

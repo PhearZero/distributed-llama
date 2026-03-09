@@ -34,6 +34,16 @@ python converter/convert-llama.py /path/to/llama_weights_dir q40
 
 Once you have a `.m` model, you can run it with NPU acceleration using the `--rkllm 1` flag. This will offload Matrix Multiplication (MatMul) operations to the Rockchip NPU, while other operations remain on the CPU.
 
+### Library Dependencies
+
+Before building, you must ensure the Rockchip NPU runtime libraries are in the `src/rkllama/lib/` directory:
+
+```bash
+mkdir -p src/rkllama/lib/
+cp rknn-toolkit2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so src/rkllama/lib/
+cp rknn-llm/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so src/rkllama/lib/
+```
+
 ### Basic Inference
 
 ```bash
