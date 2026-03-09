@@ -5,6 +5,7 @@
 #include "nn-cpu-ops.hpp"
 #include "rknn_api.h"
 #include <map>
+#include <cassert>
 
 class NnRkllmDevice : public NnDevice {
 private:
@@ -24,6 +25,7 @@ public:
 class NnRkllmDeviceSegment : public NnDeviceSegment {
 private:
     NnNetConfig *netConfig;
+    NnNodeConfig *nodeConfig;
     NnUint segmentIndex;
     NnSegmentConfig *segmentConfig;
     NnNetExecution *netExecution;
@@ -48,7 +50,7 @@ public:
     NnBufferConfig *cpuBufferConfigs = nullptr;
     NnByte *cpuBufferFlags = nullptr;
 
-    NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution);
+    NnRkllmDeviceSegment(NnNetConfig *netConfig, NnNodeConfig *nodeConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution);
     ~NnRkllmDeviceSegment() override;
     void loadWeight(NnUint opIndex, NnSize offset, NnSize nBytes, NnByte *weight) override;
     void forward(NnUint opIndex, NnUint nThreads, NnUint threadIndex, NnUint batchSize) override;

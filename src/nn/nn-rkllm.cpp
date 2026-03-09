@@ -26,7 +26,7 @@ NnUint NnRkllmDevice::maxNThreads() {
 }
 
 NnDeviceSegment *NnRkllmDevice::createSegment(NnUint segmentIndex) {
-    NnRkllmDeviceSegment *segment = new NnRkllmDeviceSegment(netConfig, segmentIndex, &nodeConfig->segments[segmentIndex], netExecution);
+    NnRkllmDeviceSegment *segment = new NnRkllmDeviceSegment(netConfig, nodeConfig, segmentIndex, &nodeConfig->segments[segmentIndex], netExecution);
     if (this->cpuFallbackDevice) {
         NnCpuDevice *cpuDevice = (NnCpuDevice *)this->cpuFallbackDevice.get();
         segment->cpuBuffers = cpuDevice->buffers;
@@ -36,8 +36,8 @@ NnDeviceSegment *NnRkllmDevice::createSegment(NnUint segmentIndex) {
     return segment;
 }
 
-NnRkllmDeviceSegment::NnRkllmDeviceSegment(NnNetConfig *netConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution)
-    : netConfig(netConfig), segmentIndex(segmentIndex), segmentConfig(segmentConfig), netExecution(netExecution) {
+NnRkllmDeviceSegment::NnRkllmDeviceSegment(NnNetConfig *netConfig, NnNodeConfig *nodeConfig, NnUint segmentIndex, NnSegmentConfig *segmentConfig, NnNetExecution *netExecution)
+    : netConfig(netConfig), nodeConfig(nodeConfig), segmentIndex(segmentIndex), segmentConfig(segmentConfig), netExecution(netExecution) {
     cpuOpForward.resize(segmentConfig->nOps, nullptr);
     cpuOpContexts.resize(segmentConfig->nOps);
     for (NnUint i = 0; i < segmentConfig->nOps; i++) {
@@ -257,9 +257,14 @@ void NnRkllmDeviceSegment::forward(NnUint opIndex, NnUint nThreads, NnUint threa
                 *pntrSize = *sourceSize;
 
                 if (pointerConfig->type == PNTR_BATCHED_SLICE) {
-                    // Fallback to single node slice for now if needed, or implement full slicing
-                    // For now, assume nodeIndex 0 or implement correctly
-                    // NnRkllmDevice segment should know its nodeIndex if we passed it.
+                    assert(sourceSize->x % netConfig->nNodes == 0);
+                    NnUint xSlice = sourceSize->x / netConfig->nNodes;
+                    NnSize xSliceBytes = getBytes(sourceSize->floatType, xSlice);
+                    for (NnUint z = 0; z < sourceSize->z; z++) {
+                        for (NnUint y = 0; y < sourceSize->y; y++)
+                            pntr[z * sourceSize->y + y] = &pntr[z * sourceSize->y + y][xSliceBytes * nodeConfig->nodeIndex];
+                    }
+                    *pntrSize = size3D(sourceSize->floatType, sourceSize->z, sourceSize->y, xSlice);
                 }
                 return pntr;
             }
